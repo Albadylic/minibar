@@ -48,6 +48,16 @@ function randomPause(): number {
   return WORKER_PAUSE_MIN + Math.random() * (WORKER_PAUSE_MAX - WORKER_PAUSE_MIN);
 }
 
+function nearestBarrel(x: number, y: number): { x: number; y: number } {
+  let best = BARREL_POSITIONS[0];
+  let bestDist = Infinity;
+  for (const b of BARREL_POSITIONS) {
+    const d = (b.x - x) ** 2 + (b.y - y) ** 2;
+    if (d < bestDist) { bestDist = d; best = b; }
+  }
+  return best;
+}
+
 function createWorkers(): BarWorker[] {
   return Array.from({ length: WORKER_COUNT }, (_, i) => {
     const barrel = BARREL_POSITIONS[i % BARREL_POSITIONS.length];
@@ -57,32 +67,12 @@ function createWorkers(): BarWorker[] {
       y: barrel.y,
       targetX: barrel.x,
       targetY: barrel.y,
-      phase: 'at_barrel' as const,
-      pauseTimer: randomPause() + i * 0.6, // stagger initial departures
+      phase: 'idle' as const,
+      pauseTimer: 0,
+      assignedSeatId: null,
+      drinkCarried: null,
     };
   });
-}
-
-function pickBarTarget(customers: Customer[]): { x: number; y: number } {
-  // Try to path toward a seated customer's service position
-  const seated = customers.filter((c) => c.status === 'seated');
-  if (seated.length > 0) {
-    const pick = seated[Math.floor(Math.random() * seated.length)];
-    return BAR_SERVICE_POSITIONS[pick.seatId];
-  }
-  // Fallback: random service position
-  return BAR_SERVICE_POSITIONS[Math.floor(Math.random() * BAR_SERVICE_POSITIONS.length)];
-}
-
-function pickBarrelTarget(customers: Customer[]): { x: number; y: number } {
-  // Try to pick the barrel matching the next waiting customer's drink
-  const seated = customers.filter((c) => c.status === 'seated');
-  if (seated.length > 0) {
-    const pick = seated[Math.floor(Math.random() * seated.length)];
-    const drinkIdx = DRINKS.findIndex((d) => d.type === pick.drinkOrder);
-    if (drinkIdx >= 0) return BARREL_POSITIONS[drinkIdx];
-  }
-  return BARREL_POSITIONS[Math.floor(Math.random() * BARREL_POSITIONS.length)];
 }
 
 function createInitialState(): GameState {
@@ -217,57 +207,127 @@ function gameReducer(state: GameState, action: GameAction): GameState {
       // Remove gone customers
       customers = customers.filter((c) => c.status !== 'gone');
 
-      // Apply rating changes
-      let newRating = Math.min(MAX_RATING, Math.max(0, newState.rating + ratingDelta));
+      // Update workers
+      const workers = newState.workers.map((w) => ({ ...w }));
+      let scoreDelta = 0;
+
+      // Invalidate assignments for customers who left or timed out
+      for (const worker of workers) {
+        if (worker.assignedSeatId !== null) {
+          const still = customers.find(
+            (c) => c.seatId === worker.assignedSeatId && c.status === 'seated'
+          );
+          if (!still) {
+            worker.assignedSeatId = null;
+            worker.drinkCarried = null;
+            if (worker.phase === 'to_bar' || worker.phase === 'at_bar') {
+              const barrel = nearestBarrel(worker.x, worker.y);
+              worker.targetX = barrel.x;
+              worker.targetY = barrel.y;
+              worker.phase = 'returning';
+            } else if (worker.phase === 'to_barrel' || worker.phase === 'at_barrel') {
+              worker.phase = 'idle';
+            }
+          }
+        }
+      }
+
+      // Move workers
+      for (const worker of workers) {
+        switch (worker.phase) {
+          case 'idle':
+            break;
+          case 'to_barrel':
+          case 'to_bar':
+          case 'returning': {
+            const dx = worker.targetX - worker.x;
+            const dy = worker.targetY - worker.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const step = WORKER_SPEED * dt;
+            if (dist <= step) {
+              worker.x = worker.targetX;
+              worker.y = worker.targetY;
+              if (worker.phase === 'to_barrel') {
+                worker.phase = 'at_barrel';
+                worker.pauseTimer = randomPause();
+              } else if (worker.phase === 'to_bar') {
+                worker.phase = 'at_bar';
+                worker.pauseTimer = randomPause();
+              } else {
+                worker.phase = 'idle';
+              }
+            } else {
+              worker.x += (dx / dist) * step;
+              worker.y += (dy / dist) * step;
+            }
+            break;
+          }
+          case 'at_barrel': {
+            worker.pauseTimer -= dt;
+            if (worker.pauseTimer <= 0 && worker.assignedSeatId !== null) {
+              const service = BAR_SERVICE_POSITIONS[worker.assignedSeatId];
+              worker.targetX = service.x;
+              worker.targetY = service.y;
+              worker.phase = 'to_bar';
+            }
+            break;
+          }
+          case 'at_bar': {
+            worker.pauseTimer -= dt;
+            if (worker.pauseTimer <= 0) {
+              // Resolve the delivery
+              if (worker.assignedSeatId !== null && worker.drinkCarried) {
+                const custIdx = customers.findIndex(
+                  (c) => c.seatId === worker.assignedSeatId && c.status === 'seated'
+                );
+                if (custIdx >= 0) {
+                  const cust = customers[custIdx];
+                  const isCorrect = cust.drinkOrder === worker.drinkCarried;
+                  const timeRatio = cust.waitTimer / cust.maxWaitTime;
+                  const isFast = timeRatio > FAST_SERVE_THRESHOLD;
+                  if (isCorrect) {
+                    scoreDelta += SCORE_PER_SERVE * (isFast ? FAST_SERVE_MULTIPLIER : 1);
+                    ratingDelta += RATING_CORRECT;
+                  } else {
+                    ratingDelta += RATING_WRONG;
+                  }
+                  customers[custIdx] = {
+                    ...cust,
+                    status: isCorrect ? 'served_happy' : 'served_wrong',
+                    walkProgress: 0,
+                  };
+                }
+              }
+              worker.assignedSeatId = null;
+              worker.drinkCarried = null;
+              const barrel = nearestBarrel(worker.x, worker.y);
+              worker.targetX = barrel.x;
+              worker.targetY = barrel.y;
+              worker.phase = 'returning';
+            }
+            break;
+          }
+        }
+      }
+
+      // Apply rating and score changes (from both timeouts and worker deliveries)
+      const newRating = Math.min(MAX_RATING, Math.max(0, newState.rating + ratingDelta));
+      const newScore = newState.score + scoreDelta;
 
       // Check game over
       if (newRating <= 0) {
-        const finalHighScore = Math.max(newState.score, newState.highScore);
+        const finalHighScore = Math.max(newScore, newState.highScore);
         saveHighScore(finalHighScore);
         return {
           ...newState,
           phase: 'game_over',
+          score: newScore,
           rating: 0,
           customers,
+          workers,
           highScore: finalHighScore,
         };
       }
-
-      // Update workers
-      const workers = newState.workers.map((w) => {
-        const worker = { ...w };
-        if (worker.phase === 'to_barrel' || worker.phase === 'to_bar') {
-          const dx = worker.targetX - worker.x;
-          const dy = worker.targetY - worker.y;
-          const dist = Math.sqrt(dx * dx + dy * dy);
-          const step = WORKER_SPEED * dt;
-          if (dist <= step) {
-            worker.x = worker.targetX;
-            worker.y = worker.targetY;
-            worker.phase = worker.phase === 'to_barrel' ? 'at_barrel' : 'at_bar';
-            worker.pauseTimer = randomPause();
-          } else {
-            worker.x += (dx / dist) * step;
-            worker.y += (dy / dist) * step;
-          }
-        } else {
-          worker.pauseTimer -= dt;
-          if (worker.pauseTimer <= 0) {
-            if (worker.phase === 'at_barrel') {
-              const target = pickBarTarget(customers);
-              worker.targetX = target.x;
-              worker.targetY = target.y;
-              worker.phase = 'to_bar';
-            } else {
-              const target = pickBarrelTarget(customers);
-              worker.targetX = target.x;
-              worker.targetY = target.y;
-              worker.phase = 'to_barrel';
-            }
-          }
-        }
-        return worker;
-      });
 
       // Spawn timing
       newState.timeSinceLastSpawn += dt;
@@ -275,6 +335,7 @@ function gameReducer(state: GameState, action: GameAction): GameState {
         ...newState,
         customers,
         workers,
+        score: newScore,
         rating: newRating,
       };
 
@@ -295,51 +356,39 @@ function gameReducer(state: GameState, action: GameAction): GameState {
     case 'SERVE_CUSTOMER': {
       if (!state.selectedDrink || state.phase !== 'playing') return state;
 
-      const customerIdx = state.customers.findIndex(
+      // Must have a seated customer at that seat
+      const hasCustomer = state.customers.some(
         (c) => c.seatId === action.seatId && c.status === 'seated'
       );
-      if (customerIdx === -1) return state;
+      if (!hasCustomer) return state;
 
-      const customer = state.customers[customerIdx];
-      const isCorrect = customer.drinkOrder === state.selectedDrink;
+      // No worker already assigned to this seat
+      if (state.workers.some((w) => w.assignedSeatId === action.seatId)) return state;
 
-      const timeRatio = customer.waitTimer / customer.maxWaitTime;
-      const isFast = timeRatio > FAST_SERVE_THRESHOLD;
-      const points = isCorrect
-        ? SCORE_PER_SERVE * (isFast ? FAST_SERVE_MULTIPLIER : 1)
-        : 0;
+      // Find an idle worker
+      const workerIdx = state.workers.findIndex((w) => w.phase === 'idle');
+      if (workerIdx === -1) return state;
 
-      const ratingChange = isCorrect ? RATING_CORRECT : RATING_WRONG;
-      let newRating = Math.min(MAX_RATING, Math.max(0, state.rating + ratingChange));
+      // Dispatch the worker: barrel for the selected drink → bar service point
+      const drinkIdx = DRINKS.findIndex((d) => d.type === state.selectedDrink);
+      const barrel = drinkIdx >= 0 ? BARREL_POSITIONS[drinkIdx] : BARREL_POSITIONS[0];
 
-      const newCustomers = state.customers.map((c, i) =>
-        i === customerIdx
-          ? { ...c, status: isCorrect ? 'served_happy' as const : 'served_wrong' as const, walkProgress: 0 }
-          : c
+      const newWorkers = state.workers.map((w, i) =>
+        i === workerIdx
+          ? {
+              ...w,
+              assignedSeatId: action.seatId,
+              drinkCarried: state.selectedDrink,
+              targetX: barrel.x,
+              targetY: barrel.y,
+              phase: 'to_barrel' as const,
+            }
+          : w
       );
-
-      const newScore = state.score + points;
-
-      // Check game over
-      if (newRating <= 0) {
-        const finalHighScore = Math.max(newScore, state.highScore);
-        saveHighScore(finalHighScore);
-        return {
-          ...state,
-          phase: 'game_over',
-          score: newScore,
-          rating: 0,
-          customers: newCustomers,
-          selectedDrink: null,
-          highScore: finalHighScore,
-        };
-      }
 
       return {
         ...state,
-        score: newScore,
-        rating: newRating,
-        customers: newCustomers,
+        workers: newWorkers,
         selectedDrink: null,
       };
     }

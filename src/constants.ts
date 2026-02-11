@@ -78,9 +78,9 @@ export const BAR_SERVICE_POSITIONS: { x: number; y: number }[] = [
   { x: 76, y: 52 },
 ];
 
-// Barrel pickup positions inside the bar (where workers grab drinks)
+// Barrel pickup positions inside the bar (below the barrel labels)
 export const BARREL_POSITIONS: { x: number; y: number }[] = [
-  { x: 38, y: 24 },
-  { x: 50, y: 24 },
-  { x: 62, y: 24 },
+  { x: 38, y: 30 },
+  { x: 50, y: 30 },
+  { x: 62, y: 30 },
 ];

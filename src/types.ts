@@ -29,7 +29,7 @@ export interface Customer {
   walkProgress: number; // 0 to 1
 }
 
-export type WorkerPhase = 'to_barrel' | 'at_barrel' | 'to_bar' | 'at_bar';
+export type WorkerPhase = 'idle' | 'to_barrel' | 'at_barrel' | 'to_bar' | 'at_bar' | 'returning';
 
 export interface BarWorker {
   id: number;
@@ -39,6 +39,8 @@ export interface BarWorker {
   targetY: number;
   phase: WorkerPhase;
   pauseTimer: number;
+  assignedSeatId: number | null;
+  drinkCarried: DrinkType | null;
 }
 
 export type GamePhase = 'title' | 'playing' | 'game_over';
