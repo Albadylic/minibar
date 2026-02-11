@@ -207,32 +207,9 @@ function gameReducer(state: GameState, action: GameAction): GameState {
       // Remove gone customers
       customers = customers.filter((c) => c.status !== 'gone');
 
-      // Update workers
+      // Update workers (purely visual — always complete their full route)
       const workers = newState.workers.map((w) => ({ ...w }));
-      let scoreDelta = 0;
 
-      // Invalidate assignments for customers who left or timed out
-      for (const worker of workers) {
-        if (worker.assignedSeatId !== null) {
-          const still = customers.find(
-            (c) => c.seatId === worker.assignedSeatId && c.status === 'seated'
-          );
-          if (!still) {
-            worker.assignedSeatId = null;
-            worker.drinkCarried = null;
-            if (worker.phase === 'to_bar' || worker.phase === 'at_bar') {
-              const barrel = nearestBarrel(worker.x, worker.y);
-              worker.targetX = barrel.x;
-              worker.targetY = barrel.y;
-              worker.phase = 'returning';
-            } else if (worker.phase === 'to_barrel' || worker.phase === 'at_barrel') {
-              worker.phase = 'idle';
-            }
-          }
-        }
-      }
-
-      // Move workers
       for (const worker of workers) {
         switch (worker.phase) {
           case 'idle':
@@ -275,29 +252,6 @@ function gameReducer(state: GameState, action: GameAction): GameState {
           case 'at_bar': {
             worker.pauseTimer -= dt;
             if (worker.pauseTimer <= 0) {
-              // Resolve the delivery
-              if (worker.assignedSeatId !== null && worker.drinkCarried) {
-                const custIdx = customers.findIndex(
-                  (c) => c.seatId === worker.assignedSeatId && c.status === 'seated'
-                );
-                if (custIdx >= 0) {
-                  const cust = customers[custIdx];
-                  const isCorrect = cust.drinkOrder === worker.drinkCarried;
-                  const timeRatio = cust.waitTimer / cust.maxWaitTime;
-                  const isFast = timeRatio > FAST_SERVE_THRESHOLD;
-                  if (isCorrect) {
-                    scoreDelta += SCORE_PER_SERVE * (isFast ? FAST_SERVE_MULTIPLIER : 1);
-                    ratingDelta += RATING_CORRECT;
-                  } else {
-                    ratingDelta += RATING_WRONG;
-                  }
-                  customers[custIdx] = {
-                    ...cust,
-                    status: isCorrect ? 'served_happy' : 'served_wrong',
-                    walkProgress: 0,
-                  };
-                }
-              }
               worker.assignedSeatId = null;
               worker.drinkCarried = null;
               const barrel = nearestBarrel(worker.x, worker.y);
@@ -310,18 +264,16 @@ function gameReducer(state: GameState, action: GameAction): GameState {
         }
       }
 
-      // Apply rating and score changes (from both timeouts and worker deliveries)
+      // Apply rating changes (timeouts only)
       const newRating = Math.min(MAX_RATING, Math.max(0, newState.rating + ratingDelta));
-      const newScore = newState.score + scoreDelta;
 
       // Check game over
       if (newRating <= 0) {
-        const finalHighScore = Math.max(newScore, newState.highScore);
+        const finalHighScore = Math.max(newState.score, newState.highScore);
         saveHighScore(finalHighScore);
         return {
           ...newState,
           phase: 'game_over',
-          score: newScore,
           rating: 0,
           customers,
           workers,
@@ -335,7 +287,6 @@ function gameReducer(state: GameState, action: GameAction): GameState {
         ...newState,
         customers,
         workers,
-        score: newScore,
         rating: newRating,
       };
 
@@ -356,38 +307,72 @@ function gameReducer(state: GameState, action: GameAction): GameState {
     case 'SERVE_CUSTOMER': {
       if (!state.selectedDrink || state.phase !== 'playing') return state;
 
-      // Must have a seated customer at that seat
-      const hasCustomer = state.customers.some(
+      const customerIdx = state.customers.findIndex(
         (c) => c.seatId === action.seatId && c.status === 'seated'
       );
-      if (!hasCustomer) return state;
+      if (customerIdx === -1) return state;
 
-      // No worker already assigned to this seat
-      if (state.workers.some((w) => w.assignedSeatId === action.seatId)) return state;
+      // Resolve the order immediately
+      const customer = state.customers[customerIdx];
+      const isCorrect = customer.drinkOrder === state.selectedDrink;
 
-      // Find an idle worker
-      const workerIdx = state.workers.findIndex((w) => w.phase === 'idle');
-      if (workerIdx === -1) return state;
+      const timeRatio = customer.waitTimer / customer.maxWaitTime;
+      const isFast = timeRatio > FAST_SERVE_THRESHOLD;
+      const points = isCorrect
+        ? SCORE_PER_SERVE * (isFast ? FAST_SERVE_MULTIPLIER : 1)
+        : 0;
 
-      // Dispatch the worker: barrel for the selected drink → bar service point
+      const ratingChange = isCorrect ? RATING_CORRECT : RATING_WRONG;
+      const newRating = Math.min(MAX_RATING, Math.max(0, state.rating + ratingChange));
+      const newScore = state.score + points;
+
+      const newCustomers = state.customers.map((c, i) =>
+        i === customerIdx
+          ? { ...c, status: isCorrect ? 'served_happy' as const : 'served_wrong' as const, walkProgress: 0 }
+          : c
+      );
+
+      // Dispatch an idle worker for visual flavour (if available)
       const drinkIdx = DRINKS.findIndex((d) => d.type === state.selectedDrink);
       const barrel = drinkIdx >= 0 ? BARREL_POSITIONS[drinkIdx] : BARREL_POSITIONS[0];
+      const workerIdx = state.workers.findIndex((w) => w.phase === 'idle');
 
-      const newWorkers = state.workers.map((w, i) =>
-        i === workerIdx
-          ? {
-              ...w,
-              assignedSeatId: action.seatId,
-              drinkCarried: state.selectedDrink,
-              targetX: barrel.x,
-              targetY: barrel.y,
-              phase: 'to_barrel' as const,
-            }
-          : w
-      );
+      const newWorkers = workerIdx >= 0
+        ? state.workers.map((w, i) =>
+            i === workerIdx
+              ? {
+                  ...w,
+                  assignedSeatId: action.seatId,
+                  drinkCarried: state.selectedDrink,
+                  targetX: barrel.x,
+                  targetY: barrel.y,
+                  phase: 'to_barrel' as const,
+                }
+              : w
+          )
+        : state.workers;
+
+      // Check game over
+      if (newRating <= 0) {
+        const finalHighScore = Math.max(newScore, state.highScore);
+        saveHighScore(finalHighScore);
+        return {
+          ...state,
+          phase: 'game_over',
+          score: newScore,
+          rating: 0,
+          customers: newCustomers,
+          workers: newWorkers,
+          selectedDrink: null,
+          highScore: finalHighScore,
+        };
+      }
 
       return {
         ...state,
+        score: newScore,
+        rating: newRating,
+        customers: newCustomers,
         workers: newWorkers,
         selectedDrink: null,
       };
