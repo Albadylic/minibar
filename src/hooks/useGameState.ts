@@ -48,15 +48,6 @@ function randomPause(): number {
   return WORKER_PAUSE_MIN + Math.random() * (WORKER_PAUSE_MAX - WORKER_PAUSE_MIN);
 }
 
-function nearestBarrel(x: number, y: number): { x: number; y: number } {
-  let best = BARREL_POSITIONS[0];
-  let bestDist = Infinity;
-  for (const b of BARREL_POSITIONS) {
-    const d = (b.x - x) ** 2 + (b.y - y) ** 2;
-    if (d < bestDist) { bestDist = d; best = b; }
-  }
-  return best;
-}
 
 function createWorkers(): BarWorker[] {
   return Array.from({ length: WORKER_COUNT }, (_, i) => {
@@ -254,10 +245,7 @@ function gameReducer(state: GameState, action: GameAction): GameState {
             if (worker.pauseTimer <= 0) {
               worker.assignedSeatId = null;
               worker.drinkCarried = null;
-              const barrel = nearestBarrel(worker.x, worker.y);
-              worker.targetX = barrel.x;
-              worker.targetY = barrel.y;
-              worker.phase = 'returning';
+              worker.phase = 'idle';
             }
             break;
           }
